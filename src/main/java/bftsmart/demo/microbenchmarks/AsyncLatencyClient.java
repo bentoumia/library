@@ -66,7 +66,7 @@ public class AsyncLatencyClient {
         boolean readOnly = Boolean.parseBoolean(args[5]);
         boolean verbose = Boolean.parseBoolean(args[6]);
         String sign = args[7];
-        
+        int maxInFlight = (args.length<9) ? 100000:Integer.parseUnsignedInt(args[8]);
         int s = 0;
         if (!sign.equalsIgnoreCase("nosig")) s++;
         if (sign.equalsIgnoreCase("ecdsa")) s++;
@@ -87,7 +87,7 @@ public class AsyncLatencyClient {
             }
 
             System.out.println("Launching client " + (initId + i));
-            clients[i] = new AsyncLatencyClient.Client(initId + i, numberOfOps, requestSize, interval, readOnly, verbose, s);
+            clients[i] = new AsyncLatencyClient.Client(initId + i, numberOfOps, requestSize, interval, readOnly, verbose, s, maxInFlight);
         }
         
         ExecutorService exec = Executors.newFixedThreadPool(clients.length);
@@ -125,8 +125,9 @@ public class AsyncLatencyClient {
         boolean verbose;
         Random rand;
         int rampup = 3000;
-
-        public Client(int id, int numberOfOps, int requestSize, int interval, boolean readOnly, boolean verbose, int sign) {
+        int maxInFlight;
+        int currentInFlight;
+        public Client(int id, int numberOfOps, int requestSize, int interval, boolean readOnly, boolean verbose, int sign, int maxInFlight) {
 
             this.id = id;
             this.serviceProxy = new AsynchServiceProxy(id);
@@ -138,6 +139,8 @@ public class AsyncLatencyClient {
             this.reqType = (readOnly ? TOMMessageType.UNORDERED_REQUEST : TOMMessageType.ORDERED_REQUEST);
             this.verbose = verbose;
             this.request = new byte[this.requestSize];
+            this.maxInFlight = maxInFlight;
+            currentInFlight = 0;
             
             rand = new Random(System.nanoTime() + this.id);
             rand.nextBytes(request);
@@ -190,10 +193,11 @@ public class AsyncLatencyClient {
                 if (this.verbose) System.out.println("Executing experiment for " + this.numberOfOps + " ops");
 
                 for (int i = 0; i < this.numberOfOps; i++) {
-                    
+                    while(currentInFlight>= maxInFlight) {
+                      System.out.printf("Hit maxInFlight limit of %d with %d in-flight requests, backing off...\n", maxInFlight, currentInFlight);
+                    }
                     long last_send_instant = System.nanoTime();
                     this.serviceProxy.invokeAsynchRequest(this.request, new ReplyListener() {
-
                         private int replies = 0;
 
                         @Override
@@ -217,9 +221,12 @@ public class AsyncLatencyClient {
                             if (replies >= q) {
                                 if (verbose) System.out.println("[RequestContext] clean request context id: " + context.getReqId());
                                 serviceProxy.cleanAsynchRequest(context.getOperationId());
+                                currentInFlight -= 1;
+                                System.out.printf("[MaxInFlight] quorum reached, dequeued 1 request; current in-flight requests: %d\n", currentInFlight);
                             }
                         }
                     }, this.reqType);
+                    currentInFlight++;
                     if (i > (this.numberOfOps / 2)) st.store(System.nanoTime() - last_send_instant);
 
                     if (this.interval > 0 || this.rampup > 0) {
